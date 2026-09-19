@@ -553,7 +553,10 @@
   // СОЕДИНЕНИЕ
   // ============================================================
   function connectSocket() {
-    socket = new WebSocket(`ws://${location.host}`);
+    // На https-страницах браузер разрешает только защищённый wss://,
+    // на обычном http (например, при локальном запуске) — обычный ws://.
+    const wsProtocol = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    socket = new WebSocket(`${wsProtocol}${location.host}`);
     socket.onmessage = (e) => handleServerMessage(JSON.parse(e.data));
     socket.onopen = () => {
       const savedToken = localStorage.getItem(SESSION_KEY);
