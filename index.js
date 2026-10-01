@@ -167,7 +167,7 @@ const q = {
 // ------------------------------------------------------------
 const server = http.createServer((req, res) => {
   if (req.url === '/' || req.url === '/index.html') {
-    const filePath = path.join(__dirname, '..', 'client', 'index.html');
+    const filePath = path.join(__dirname, 'client', 'index.html');
     fs.readFile(filePath, (err, data) => {
       if (err) { res.writeHead(500); res.end('Не удалось загрузить клиент'); return; }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
