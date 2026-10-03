@@ -287,6 +287,48 @@
 
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ---------- Сообщения: пузырь + реакции ---------- */
+  .msg-col { display: flex; flex-direction: column; min-width: 0; }
+  .msg-row.me .msg-col { align-items: flex-end; }
+  .msg-row.other .msg-col { align-items: flex-start; }
+  .msg { cursor: pointer; }
+  .msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+  .reactions:empty { display: none; }
+  .reaction-chip {
+    background: var(--bg-input); border: 1px solid transparent; border-radius: 12px;
+    padding: 2px 8px; font-size: 13px; cursor: pointer; color: var(--text); user-select: none;
+  }
+  .reaction-chip.mine { background: rgba(78,164,245,0.25); border-color: var(--accent); }
+
+  /* ---------- Меню сообщения ---------- */
+  #msgMenu {
+    position: fixed; z-index: 200; display: none; min-width: 210px; padding: 6px;
+    background: var(--bg-sidebar); border-radius: 14px; box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+  }
+  .menu-emojis { display: flex; gap: 2px; padding: 4px 4px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+  .menu-emoji { background: none; border: none; font-size: 22px; cursor: pointer; padding: 4px 6px; border-radius: 8px; }
+  .menu-emoji:hover { background: var(--bg-hover); }
+  .menu-emoji.active { background: rgba(78,164,245,0.25); }
+  .menu-action {
+    display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text);
+    padding: 9px 12px; font-size: 14px; border-radius: 8px; cursor: pointer;
+  }
+  .menu-action:hover { background: var(--bg-hover); }
+  .menu-action.danger { color: var(--danger); }
+
+  /* ---------- Режим редактирования ---------- */
+  #editBanner { display: none; align-items: center; gap: 10px; padding: 8px 16px; background: var(--bg-sidebar); border-top: 1px solid var(--border); z-index: 1; }
+  .edit-banner-body { flex: 1; min-width: 0; border-left: 3px solid var(--accent); padding-left: 10px; }
+  .edit-banner-title { font-size: 12.5px; color: var(--accent); font-weight: 600; }
+  .edit-banner-text { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #editCancelBtn { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; }
+
+  /* ---------- Служебные плашки ---------- */
+  #chatLoading { margin: auto; display: none; color: var(--muted); z-index: 1; }
+  #connectionBanner { position: fixed; top: 0; left: 0; right: 0; background: #c0392b; color: #fff; text-align: center; font-size: 13px; padding: 6px; z-index: 300; display: none; }
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #222; color: #fff; padding: 10px 18px; border-radius: 20px; font-size: 14px; z-index: 300; display: none; }
 </style>
 </head>
 <body>
@@ -459,12 +501,20 @@
     <div id="chatEmptyState" class="empty-hint" style="margin:auto; z-index:1;">
       Выберите чат слева или найдите пользователя,<br>чтобы начать переписку
     </div>
+    <div id="chatLoading">Загрузка…</div>
     <div id="chatActive" style="display:none; height:100%; flex-direction:column;">
       <div id="chatHeader">
         <div class="avatar small" id="chatHeaderAvatar">?</div>
         <div><div id="chatHeaderName">—</div><div id="chatHeaderStatus">—</div></div>
       </div>
       <div id="messagesArea"></div>
+      <div id="editBanner">
+        <div class="edit-banner-body">
+          <div class="edit-banner-title">✏️ Редактирование сообщения</div>
+          <div class="edit-banner-text" id="editBannerText"></div>
+        </div>
+        <button id="editCancelBtn" title="Отмена">✕</button>
+      </div>
       <div id="inputBar">
         <input type="text" id="messageInput" placeholder="Написать сообщение..." />
         <button id="sendBtn">➤</button>
@@ -530,6 +580,13 @@
   </div>
 </div>
 
+<div id="msgMenu">
+  <div class="menu-emojis" id="msgMenuReactions"></div>
+  <div id="msgMenuActions"></div>
+</div>
+<div id="connectionBanner">Нет соединения с сервером — переподключаемся…</div>
+<div id="toast"></div>
+
 <input type="file" id="avatarFileInput" accept="image/*" style="display:none;" />
 
 <script>
@@ -552,6 +609,10 @@
   // ============================================================
   // СОЕДИНЕНИЕ
   // ============================================================
+  let reconnectDelay = 1000;
+  let reconnectTimer = null;
+  let appEntered = false;
+
   function connectSocket() {
     // На https-страницах браузер разрешает только защищённый wss://,
     // на обычном http (например, при локальном запуске) — обычный ws://.
@@ -559,14 +620,38 @@
     socket = new WebSocket(`${wsProtocol}${location.host}`);
     socket.onmessage = (e) => handleServerMessage(JSON.parse(e.data));
     socket.onopen = () => {
+      reconnectDelay = 1000;
+      document.getElementById('connectionBanner').style.display = 'none';
       const savedToken = localStorage.getItem(SESSION_KEY);
       if (savedToken) send({ type: 'resume_session', token: savedToken });
+    };
+    // Если соединение оборвалось (сервер на Render проснулся/перезапустился,
+    // пропала сеть) — переподключаемся сами и входим по сохранённой сессии.
+    socket.onclose = () => {
+      if (appEntered) document.getElementById('connectionBanner').style.display = 'block';
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connectSocket, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 10000);
     };
   }
   connectSocket();
 
+  // Возвращает true, если сообщение реально отправлено
   function send(obj) {
-    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(obj));
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(obj));
+      return true;
+    }
+    return false;
+  }
+
+  let toastTimer = null;
+  function showToast(text) {
+    const el = document.getElementById('toast');
+    el.textContent = text;
+    el.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.style.display = 'none'; }, 3500);
   }
 
   // ============================================================
@@ -732,6 +817,7 @@
 
       case 'session_invalid':
         localStorage.removeItem(SESSION_KEY);
+        if (appEntered) location.reload();
         break;
 
       case 'username_check_result':
@@ -755,22 +841,36 @@
         break;
 
       case 'direct_message':
-        if (currentChatEmail === data.withEmail) appendMessageBubble(data.message, false);
+        if (isActiveScope({ kind: 'direct', withEmail: data.withEmail })) appendMessage(data.message);
         send({ type: 'get_chat_list' });
         break;
 
       case 'class_chat_joined':
-        openClassChat(data.className);
+        // После вступления сразу запрашиваем историю чата класса
+        tryOpenClassChat(data.className);
         break;
 
       case 'class_chat_history':
+        if (data.className !== currentClassChat) break;
         pendingClassChatOpen = null;
-        openClassChat(data.className);
+        showClassChatUI(data.className);
         renderClassConversation(data.className, data.messages);
         break;
 
       case 'class_message':
-        if (currentClassChat === data.className) appendMessageBubble(data.message, true);
+        if (isActiveScope({ kind: 'class', className: data.className })) appendMessage(data.message);
+        break;
+
+      case 'message_edited':
+        applyMessageEdited(data);
+        break;
+
+      case 'message_deleted':
+        applyMessageDeleted(data);
+        break;
+
+      case 'reactions_updated':
+        applyReactionsUpdated(data);
         break;
 
       case 'profile_updated':
@@ -820,6 +920,7 @@
     else if (ctx === 'update_password') document.getElementById('modalPasswordError').textContent = data.message;
     else if (ctx === 'update_avatar') alert(data.message);
     else if (ctx === 'update_class') alert(data.message);
+    else if (['edit_message', 'delete_message', 'send_direct_message', 'send_class_message'].includes(ctx)) showToast(data.message);
   }
 
   // ============================================================
@@ -838,6 +939,17 @@
     updateNotificationsToggle(user.notificationsEnabled);
 
     send({ type: 'get_chat_list' });
+
+    // Повторный вход после переподключения: обновляем открытый чат
+    if (appEntered) reloadActiveChat();
+    appEntered = true;
+  }
+
+  function reloadActiveChat() {
+    if (currentChatEmail) send({ type: 'open_conversation', withEmail: currentChatEmail });
+    else if (currentClassChat && document.getElementById('chatActive').style.display === 'flex') {
+      send({ type: 'open_class_chat', className: currentClassChat });
+    }
   }
 
   function applyProfileToUI(user) {
@@ -886,8 +998,10 @@
   });
 
   document.getElementById('logoutBtn').addEventListener('click', () => {
+    const token = localStorage.getItem(SESSION_KEY);
+    if (token) send({ type: 'logout', token }); // сервер забывает эту сессию
     localStorage.removeItem(SESSION_KEY);
-    location.reload();
+    setTimeout(() => location.reload(), 150);
   });
 
   // ============================================================
@@ -1103,6 +1217,9 @@
     currentClassChat = className;
     currentChatEmail = null;
     pendingClassChatOpen = className;
+    clearComposer();
+    clearMessages();          // чужие сообщения не должны оставаться на экране
+    showChatPane('loading');
     send({ type: 'open_class_chat', className });
   }
 
@@ -1138,13 +1255,49 @@
   // ============================================================
   // ЛИЧНЫЙ ЧАТ
   // ============================================================
+  // Какая панель показана справа: пусто / загрузка / чат / экран «Вступить»
+  function showChatPane(which) {
+    document.getElementById('chatEmptyState').style.display = which === 'empty' ? '' : 'none';
+    document.getElementById('chatLoading').style.display = which === 'loading' ? 'flex' : 'none';
+    document.getElementById('chatActive').style.display = which === 'chat' ? 'flex' : 'none';
+    const gate = document.getElementById('joinGate');
+    gate.style.display = which === 'join' ? 'flex' : 'none';
+    if (which === 'join') { gate.style.flexDirection = 'column'; gate.style.alignItems = 'center'; }
+  }
+
+  // Полностью очищает список сообщений. Вызывается при КАЖДОМ переключении чата —
+  // раньше этого не было, и сообщения прежнего чата оставались на экране.
+  function clearMessages() {
+    messageRows.clear();
+    document.getElementById('messagesArea').innerHTML = '';
+    hideMessageMenu();
+  }
+
+  // Поле ввода и режим редактирования сбрасываются при смене чата,
+  // чтобы недописанный текст не ушёл в другой чат
+  function clearComposer() {
+    editingMessage = null;
+    document.getElementById('messageInput').value = '';
+    document.getElementById('editBanner').style.display = 'none';
+  }
+
+  // Относится ли событие к чату, который сейчас открыт
+  function isActiveScope(data) {
+    if (data.kind === 'direct') return currentChatEmail !== null && data.withEmail === currentChatEmail;
+    if (data.kind === 'class') return currentClassChat !== null && data.className === currentClassChat;
+    return false;
+  }
+
+  // ============================================================
+  // ЛИЧНЫЙ ЧАТ
+  // ============================================================
   function openPersonalChat(email, username, displayName, avatarData) {
     currentChatEmail = email;
     currentClassChat = null;
-
-    document.getElementById('joinGate').style.display = 'none';
-    document.getElementById('chatEmptyState').style.display = 'none';
-    document.getElementById('chatActive').style.display = 'flex';
+    pendingClassChatOpen = null;
+    clearComposer();
+    clearMessages();
+    showChatPane('chat');
 
     const headerAvatar = document.getElementById('chatHeaderAvatar');
     headerAvatar.className = 'avatar small';
@@ -1158,9 +1311,9 @@
 
   function renderConversation(withEmail, messages) {
     if (withEmail !== currentChatEmail) return;
-    const area = document.getElementById('messagesArea');
-    area.innerHTML = '';
-    messages.forEach((m) => appendMessageBubble(m, false));
+    clearMessages();
+    messages.forEach((m) => appendMessage(m, true));
+    scrollMessagesToBottom();
   }
 
   // ============================================================
@@ -1169,25 +1322,16 @@
   function showClassJoinGate(className) {
     currentClassChat = className;
     currentChatEmail = null;
-
-    document.getElementById('chatEmptyState').style.display = 'none';
-    document.getElementById('chatActive').style.display = 'none';
-    document.getElementById('joinGate').style.display = 'flex';
-    document.getElementById('joinGate').style.flexDirection = 'column';
-    document.getElementById('joinGate').style.alignItems = 'center';
+    clearComposer();
+    clearMessages();
+    showChatPane('join');
     document.getElementById('joinGateText').textContent = `Вступите в чат класса ${className}, чтобы читать и писать сообщения`;
     document.getElementById('joinGateBtn').onclick = () => send({ type: 'join_class_chat', className });
-
     switchToChatsPanel();
   }
 
-  function openClassChat(className) {
-    currentClassChat = className;
-    currentChatEmail = null;
-
-    document.getElementById('chatEmptyState').style.display = 'none';
-    document.getElementById('joinGate').style.display = 'none';
-    document.getElementById('chatActive').style.display = 'flex';
+  function showClassChatUI(className) {
+    showChatPane('chat');
 
     const headerAvatar = document.getElementById('chatHeaderAvatar');
     headerAvatar.className = 'avatar small group';
@@ -1200,24 +1344,217 @@
 
   function renderClassConversation(className, messages) {
     if (className !== currentClassChat) return;
-    const area = document.getElementById('messagesArea');
-    area.innerHTML = '';
-    messages.forEach((m) => appendMessageBubble(m, true));
+    clearMessages();
+    messages.forEach((m) => appendMessage(m, true));
+    scrollMessagesToBottom();
   }
 
   // ============================================================
-  // ОБЩИЙ РЕНДЕР СООБЩЕНИЙ
+  // СООБЩЕНИЯ: отрисовка, меню, реакции, редактирование, удаление
   // ============================================================
-  function appendMessageBubble(message, showAuthor) {
+  const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+  const messageRows = new Map(); // "kind:id" -> { row, message, textEl, metaEl, reactionsEl }
+  let editingMessage = null;     // { kind, id } пока редактируем своё сообщение
+
+  function scrollMessagesToBottom() {
     const area = document.getElementById('messagesArea');
+    area.scrollTop = area.scrollHeight;
+  }
+
+  function formatTime(ts) {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function renderMeta(entry) {
+    entry.metaEl.textContent = (entry.message.editedAt ? 'изменено · ' : '') + formatTime(entry.message.timestamp);
+  }
+
+  function myReactionOf(message) {
+    const reactions = message.reactions || {};
+    for (const emoji of Object.keys(reactions)) {
+      if (reactions[emoji].includes(myEmail)) return emoji;
+    }
+    return null;
+  }
+
+  function renderReactions(entry) {
+    const box = entry.reactionsEl;
+    box.innerHTML = '';
+    const reactions = entry.message.reactions || {};
+    Object.keys(reactions).forEach((emoji) => {
+      const who = reactions[emoji];
+      if (!who.length) return;
+      const chip = document.createElement('span');
+      chip.className = 'reaction-chip' + (who.includes(myEmail) ? ' mine' : '');
+      chip.textContent = `${emoji} ${who.length}`;
+      chip.addEventListener('click', (ev) => { ev.stopPropagation(); toggleReaction(entry.message, emoji); });
+      box.appendChild(chip);
+    });
+  }
+
+  function appendMessage(message, forceScroll) {
+    const key = message.kind + ':' + message.id;
+    if (messageRows.has(key)) return; // защита от дублей
+
+    const area = document.getElementById('messagesArea');
+    const wasNearBottom = (area.scrollHeight - area.scrollTop - area.clientHeight) < 140;
     const isMe = message.from === myEmail;
+
     const row = document.createElement('div');
     row.className = 'msg-row ' + (isMe ? 'me' : 'other');
-    const time = new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const authorHtml = (showAuthor && !isMe && message.fromDisplayName) ? `<span class="author">${escapeHtml(message.fromDisplayName)}</span>` : '';
-    row.innerHTML = `<div class="msg">${authorHtml}${escapeHtml(message.text)}<span class="msg-time">${time}</span></div>`;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg';
+
+    if (message.kind === 'class' && !isMe && message.fromDisplayName) {
+      const author = document.createElement('span');
+      author.className = 'author';
+      author.textContent = message.fromDisplayName;
+      bubble.appendChild(author);
+    }
+
+    const textEl = document.createElement('span');
+    textEl.className = 'msg-text';
+    textEl.textContent = message.text;
+    bubble.appendChild(textEl);
+
+    const metaEl = document.createElement('span');
+    metaEl.className = 'msg-time';
+    bubble.appendChild(metaEl);
+
+    const reactionsEl = document.createElement('div');
+    reactionsEl.className = 'reactions';
+
+    const col = document.createElement('div');
+    col.className = 'msg-col';
+    col.appendChild(bubble);
+    col.appendChild(reactionsEl);
+    row.appendChild(col);
+
+    const entry = { row, message, textEl, metaEl, reactionsEl };
+    messageRows.set(key, entry);
+    renderMeta(entry);
+    renderReactions(entry);
+
+    // Клик или правая кнопка по сообщению открывают меню (не мешаем выделять текст)
+    bubble.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const selected = (typeof window.getSelection === 'function') ? String(window.getSelection()) : '';
+      if (selected) return;
+      showMessageMenu(entry, ev);
+    });
+    bubble.addEventListener('contextmenu', (ev) => { ev.preventDefault(); showMessageMenu(entry, ev); });
+
     area.appendChild(row);
-    area.scrollTop = area.scrollHeight;
+    if (forceScroll || wasNearBottom || isMe) scrollMessagesToBottom();
+  }
+
+  // ---------- меню сообщения ----------
+  function hideMessageMenu() {
+    document.getElementById('msgMenu').style.display = 'none';
+  }
+
+  function showMessageMenu(entry, ev) {
+    const menu = document.getElementById('msgMenu');
+    const reactionsBox = document.getElementById('msgMenuReactions');
+    const actionsBox = document.getElementById('msgMenuActions');
+    reactionsBox.innerHTML = '';
+    actionsBox.innerHTML = '';
+
+    const message = entry.message;
+    const mine = myReactionOf(message);
+
+    REACTIONS.forEach((emoji) => {
+      const btn = document.createElement('button');
+      btn.className = 'menu-emoji' + (mine === emoji ? ' active' : '');
+      btn.textContent = emoji;
+      btn.addEventListener('click', () => { toggleReaction(message, emoji); hideMessageMenu(); });
+      reactionsBox.appendChild(btn);
+    });
+
+    function addAction(label, onClick, danger) {
+      const btn = document.createElement('button');
+      btn.className = 'menu-action' + (danger ? ' danger' : '');
+      btn.textContent = label;
+      btn.addEventListener('click', () => { hideMessageMenu(); onClick(); });
+      actionsBox.appendChild(btn);
+    }
+
+    addAction('📋 Копировать текст', () => {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(message.text).catch(() => {});
+    });
+    if (message.from === myEmail) {
+      addAction('✏️ Редактировать', () => startEdit(message));
+      addAction('🗑 Удалить', () => deleteMessage(message), true);
+    }
+
+    menu.style.display = 'block';
+    const w = menu.offsetWidth || 230;
+    const h = menu.offsetHeight || 200;
+    const x = Math.max(8, Math.min(ev.clientX, window.innerWidth - w - 8));
+    const y = Math.max(8, Math.min(ev.clientY, window.innerHeight - h - 8));
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+  }
+
+  document.getElementById('msgMenu').addEventListener('click', (ev) => ev.stopPropagation());
+  document.addEventListener('click', hideMessageMenu);
+  window.addEventListener('resize', hideMessageMenu);
+  document.getElementById('messagesArea').addEventListener('scroll', hideMessageMenu);
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') { hideMessageMenu(); if (editingMessage) clearComposer(); }
+  });
+
+  // ---------- реакции ----------
+  function toggleReaction(message, emoji) {
+    send({ type: 'react_message', kind: message.kind, id: message.id, emoji });
+  }
+
+  // ---------- редактирование ----------
+  function startEdit(message) {
+    editingMessage = { kind: message.kind, id: message.id, original: message.text };
+    const input = document.getElementById('messageInput');
+    input.value = message.text;
+    document.getElementById('editBannerText').textContent = message.text;
+    document.getElementById('editBanner').style.display = 'flex';
+    input.focus();
+  }
+  document.getElementById('editCancelBtn').addEventListener('click', clearComposer);
+
+  // ---------- удаление ----------
+  function deleteMessage(message) {
+    if (!confirm('Удалить это сообщение? Действие нельзя отменить.')) return;
+    send({ type: 'delete_message', kind: message.kind, id: message.id });
+  }
+
+  // ---------- события от сервера ----------
+  function applyMessageEdited(data) {
+    if (data.kind === 'direct') send({ type: 'get_chat_list' }); // обновить превью в списке
+    if (!isActiveScope(data)) return;
+    const entry = messageRows.get(data.kind + ':' + data.id);
+    if (!entry) return;
+    entry.message.text = data.text;
+    entry.message.editedAt = data.editedAt;
+    entry.textEl.textContent = data.text;
+    renderMeta(entry);
+  }
+
+  function applyMessageDeleted(data) {
+    if (data.kind === 'direct') send({ type: 'get_chat_list' });
+    if (!isActiveScope(data)) return;
+    const entry = messageRows.get(data.kind + ':' + data.id);
+    if (!entry) return;
+    entry.row.remove();
+    messageRows.delete(data.kind + ':' + data.id);
+    if (editingMessage && editingMessage.kind === data.kind && editingMessage.id === data.id) clearComposer();
+  }
+
+  function applyReactionsUpdated(data) {
+    if (!isActiveScope(data)) return;
+    const entry = messageRows.get(data.kind + ':' + data.id);
+    if (!entry) return;
+    entry.message.reactions = data.reactions || {};
+    renderReactions(entry);
   }
 
   function switchToChatsPanel() { switchPanel('chats'); }
@@ -1230,10 +1567,23 @@
     const text = input.value.trim();
     if (!text) return;
 
-    if (currentClassChat) send({ type: 'send_class_message', className: currentClassChat, text });
-    else if (currentChatEmail) send({ type: 'send_direct_message', toEmail: currentChatEmail, text });
+    // Режим редактирования: отправляем правку, а не новое сообщение
+    if (editingMessage) {
+      if (text === editingMessage.original) { clearComposer(); return; }
+      if (!send({ type: 'edit_message', kind: editingMessage.kind, id: editingMessage.id, text })) {
+        showToast('Нет соединения с сервером');
+        return;
+      }
+      clearComposer();
+      return;
+    }
+
+    let ok = false;
+    if (currentClassChat) ok = send({ type: 'send_class_message', className: currentClassChat, text });
+    else if (currentChatEmail) ok = send({ type: 'send_direct_message', toEmail: currentChatEmail, text });
     else return;
 
+    if (!ok) { showToast('Нет соединения с сервером'); return; } // текст не стираем
     input.value = '';
   }
 
